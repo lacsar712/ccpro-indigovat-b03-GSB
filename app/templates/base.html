@@ -197,6 +197,37 @@
     .st-idle .status-dot { background: var(--idle); }
     .st-reducing .status-dot { background: #7eb8d8; box-shadow: 0 0 8px rgba(126, 184, 216, 0.7); }
     .st-ready .status-dot { background: #5dcea8; box-shadow: 0 0 8px rgba(93, 206, 168, 0.65); }
+    .dot-idle { background: var(--idle); }
+    .dot-reducing { background: #7eb8d8; box-shadow: 0 0 8px rgba(126, 184, 216, 0.7); }
+    .dot-ready { background: #5dcea8; box-shadow: 0 0 8px rgba(93, 206, 168, 0.65); }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+      margin: -0.3rem 0 1rem;
+      font-size: 0.84rem;
+      color: rgba(216, 235, 232, 0.85);
+    }
+    .legend-item b { font-variant-numeric: tabular-nums; }
+    .legend-visible { margin-left: auto; opacity: 0.8; }
+    .rule-line {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      flex-wrap: wrap;
+      margin: 0 0 1rem;
+    }
+    .rule-chip {
+      padding: 0.22rem 0.7rem;
+      border-radius: 999px;
+      font-size: 0.84rem;
+      border: 1px solid;
+      white-space: nowrap;
+    }
+    .rule-chip.ok { background: #e4f6ee; color: #14684d; border-color: #9fd4c0; }
+    .rule-chip.no { background: #fdeeee; color: #8b1e1e; border-color: #efb9b9; }
+    .rule-note { font-size: 0.8rem; color: #5a707a; flex: 1 1 320px; }
     .status-label { font-size: 0.78rem; opacity: 0.9; }
     .spark { display: block; margin-top: 0.25rem; opacity: 0.9; }
     .panel {

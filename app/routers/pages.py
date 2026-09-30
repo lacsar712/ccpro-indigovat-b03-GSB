@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import DipLot, Vat, Workshop
-from app.services.vat_rules import VatRuleError, validate_vat_status_change
+from app.services.vat_rules import (
+    VatRuleError,
+    redox_ready,
+    validate_vat_status_change,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -29,6 +33,23 @@ STATUS_LABELS = {
     Vat.STATUS_REDUCING: "还原中",
     Vat.STATUS_READY: "可染色",
 }
+
+
+def _clean_status_filter(raw: Optional[str]) -> Optional[str]:
+    """状态筛只认合法状态值，其余一律视为不筛。"""
+    if raw and raw.strip() in STATUS_LABELS:
+        return raw.strip()
+    return None
+
+
+def _bay_redirect(pk: int, ws: Optional[int], status_filter: Optional[str]) -> str:
+    """改状态/登记后回跳还原台，筛选条件集合（工坊+状态）原样带回。"""
+    url = f"/?vat={pk}"
+    if ws:
+        url += f"&workshop={ws}"
+    if status_filter:
+        url += f"&fstatus={status_filter}"
+    return url
 
 
 def render(request: Request, name: str, context: dict, status_code: int = 200):
@@ -70,6 +91,8 @@ def _vat_payload(vat: Vat) -> dict:
         "statusLabel": STATUS_LABELS.get(vat.status, vat.status),
         "workshopId": vat.workshop_id,
         "workshopName": vat.workshop.name if vat.workshop else "",
+        # 达标条文与改状态入口共用 vat_rules.redox_ready 同一口径
+        "potentialOk": redox_ready(latest),
         "lastRedox": float(latest.redoxMv) if latest and latest.redoxMv is not None else None,
         "lastMeters": float(latest.clothMeters) if latest else None,
         "lastDippedAt": latest.dippedAt.strftime("%Y-%m-%d %H:%M") if latest else None,
@@ -93,8 +116,9 @@ def _bay_context(
     workshop_id: Optional[int] = None,
     selected_vat: Optional[int] = None,
     error: Optional[str] = None,
+    status_filter: Optional[str] = None,
 ):
-    # 始终下发全部缸位；工坊仅作前端 chip 筛选，避免切回「全部」时缺数据
+    # 始终下发全部缸位；工坊与状态仅作前端筛选，避免切回「全部」时缺数据
     workshops = db.query(Workshop).order_by(Workshop.name).all()
     vats = (
         db.query(Vat)
@@ -108,6 +132,7 @@ def _bay_context(
         "workshops": [{"id": w.id, "name": w.name, "region": w.region} for w in workshops],
         "vats": [_vat_payload(v) for v in vats],
         "filter_workshop": workshop_id,
+        "filter_status": _clean_status_filter(status_filter),
         "selected_vat": selected_vat,
         "error": error,
         "status_labels": STATUS_LABELS,
@@ -120,12 +145,17 @@ async def bay(
     request: Request,
     workshop: Optional[int] = None,
     vat: Optional[int] = None,
+    fstatus: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     user = _need_login(request, db)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    return render(request, "bay.html", _bay_context(request, db, user, workshop, vat))
+    return render(
+        request,
+        "bay.html",
+        _bay_context(request, db, user, workshop, vat, status_filter=fstatus),
+    )
 
 
 @router.post("/bay/vats/{pk}/status", response_class=HTMLResponse)
@@ -134,6 +164,7 @@ async def bay_vat_status(
     request: Request,
     status: str = Form(...),
     workshop: str = Form(""),
+    fstatus: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user = _need_login(request, db)
@@ -146,6 +177,7 @@ async def bay_vat_status(
         .first()
     )
     ws = int(workshop) if workshop.strip() else None
+    fs = _clean_status_filter(fstatus)
     if not item:
         return RedirectResponse("/", status_code=303)
     error = None
@@ -154,14 +186,15 @@ async def bay_vat_status(
         validate_vat_status_change(item, status, latest)
         item.status = status
         db.commit()
-        return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
+        return RedirectResponse(_bay_redirect(pk, ws, fs), status_code=303)
     except VatRuleError as exc:
         error = exc.message
         db.rollback()
+    # 改状态被拒：还原台照常渲染并保持展开该缸，筛选条件集合不丢
     return render(
         request,
         "bay.html",
-        _bay_context(request, db, user, ws, pk, error),
+        _bay_context(request, db, user, ws, pk, error, status_filter=fs),
         status_code=400,
     )
 
@@ -174,6 +207,7 @@ async def bay_log_lot(
     clothMeters: str = Form(...),
     redoxMv: str = Form(""),
     workshop: str = Form(""),
+    fstatus: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user = _need_login(request, db)
@@ -181,10 +215,12 @@ async def bay_log_lot(
         return RedirectResponse("/login", status_code=303)
     item = db.get(Vat, pk)
     ws = int(workshop) if workshop.strip() else None
+    fs = _clean_status_filter(fstatus)
     if not item:
         return RedirectResponse("/", status_code=303)
     error = None
     try:
+        # 只追加浸染批次：条文随新读数重算，缸状态字段不得在此静默改写
         lot = DipLot(
             vat_id=pk,
             dippedAt=datetime.fromisoformat(dippedAt),
@@ -193,14 +229,14 @@ async def bay_log_lot(
         )
         db.add(lot)
         db.commit()
-        return RedirectResponse(f"/?vat={pk}" + (f"&workshop={ws}" if ws else ""), status_code=303)
+        return RedirectResponse(_bay_redirect(pk, ws, fs), status_code=303)
     except (ValueError, InvalidOperation) as exc:
         error = f"浸染记录无效：{exc}"
         db.rollback()
     return render(
         request,
         "bay.html",
-        _bay_context(request, db, user, ws, pk, error),
+        _bay_context(request, db, user, ws, pk, error, status_filter=fs),
         status_code=400,
     )
 
