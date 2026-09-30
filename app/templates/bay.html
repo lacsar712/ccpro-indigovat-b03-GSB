@@ -18,6 +18,33 @@
     </template>
   </div>
 
+  <div class="chips status-chips" role="toolbar" aria-label="状态筛选">
+    <button
+      type="button"
+      class="chip"
+      :class="{ on: filterStatus === null }"
+      @click="setStatusFilter(null)"
+    >全部状态 <span class="chip-count" x-text="countAll()"></span></button>
+    <button
+      type="button"
+      class="chip st-chip-idle"
+      :class="{ on: filterStatus === 'idle' }"
+      @click="setStatusFilter('idle')"
+    >闲置 <span class="chip-count" x-text="countFor('idle')"></span></button>
+    <button
+      type="button"
+      class="chip st-chip-reducing"
+      :class="{ on: filterStatus === 'reducing' }"
+      @click="setStatusFilter('reducing')"
+    >还原中 <span class="chip-count" x-text="countFor('reducing')"></span></button>
+    <button
+      type="button"
+      class="chip st-chip-ready"
+      :class="{ on: filterStatus === 'ready' }"
+      @click="setStatusFilter('ready')"
+    >可染色 <span class="chip-count" x-text="countFor('ready')"></span></button>
+  </div>
+
   {% if error %}
   <div class="error-box">{{ error }}</div>
   {% endif %}
@@ -66,7 +93,7 @@
       </button>
     </template>
   </div>
-  <p class="empty-bay" x-show="filteredVats().length === 0" x-cloak>此工坊暂无染缸。</p>
+  <p class="empty-bay" x-show="filteredVats().length === 0" x-cloak>此筛选条件下暂无染缸。</p>
 
   <div class="panel" x-show="selected()" x-cloak x-transition>
     <template x-if="selected()">
@@ -76,15 +103,29 @@
           <span style="font-weight:500;font-size:0.9rem;color:#4a6670;margin-left:0.4rem"
                 x-text="selected().workshopName + ' · ' + selected().volumeL + ' L'"></span>
         </h2>
-        <p class="hint">当前 <strong x-text="selected().statusLabel"></strong>
-          · 最近浸染 <span x-text="selected().lastDippedAt || '—'"></span>
-          · 设为可染色须最新批次电位 ≤ -500 mV</p>
+        <p class="hint">当前状态字段为 <strong x-text="selected().statusLabel"></strong>
+          · 最近浸染 <span x-text="selected().lastDippedAt || '—'"></span></p>
+
+        <div class="gate" :class="selected().potentialReady ? 'gate-yes' : 'gate-no'">
+          <div class="gate-line">
+            <span class="gate-tag">达标条文</span>
+            <strong x-text="selected().potentialReady ? '是 · 电位达标' : '否 · 电位未达标'"></strong>
+            <span class="gate-threshold">门槛：最新批次电位 ≤ -500 mV</span>
+          </div>
+          <p class="gate-reason" x-text="selected().readyGateReason"></p>
+          <p class="gate-note">
+            条文只按<strong>最新批次读数</strong>派生，与改状态入口同一口径；它不是状态字段。
+            当前缸状态字段仍是「<span x-text="selected().statusLabel"></span>」——
+            条文亮「是」不会自动改写状态，写入合格读数也不会静默改写状态；只有在下方手动改状态成功后才会变。
+          </p>
+        </div>
 
         <div class="panel-grid">
           <div>
             <h3 style="font-size:1rem;margin:0 0 0.65rem;color:#1f4d6b">登记浸染</h3>
             <form method="post" :action="'/bay/vats/' + selected().id + '/lots'">
               <input type="hidden" name="workshop" :value="filterWs || ''">
+              <input type="hidden" name="status_filter" :value="filterStatus || ''">
               <label>浸染时间
                 <input type="datetime-local" name="dippedAt" required :value="nowLocal()">
               </label>
@@ -101,6 +142,7 @@
             <h3 style="font-size:1rem;margin:0 0 0.65rem;color:#1f4d6b">改缸状态</h3>
             <form method="post" :action="'/bay/vats/' + selected().id + '/status'">
               <input type="hidden" name="workshop" :value="filterWs || ''">
+              <input type="hidden" name="status_filter" :value="filterStatus || ''">
               <label>目标状态
                 <select name="status" required :value="selected().status">
                   <option value="idle">闲置</option>
@@ -130,7 +172,7 @@
     </template>
   </div>
 
-  <p class="rule-foot">工坊只作缸位筛选片；浸染与状态均在缸位展开区内完成，无独立表页。</p>
+  <p class="rule-foot">工坊、状态只作缸位筛选片；浸染与状态均在缸位展开区内完成，无独立表页。可染色张数与状态筛选只认状态字段已为「可染色」的缸。</p>
 </div>
 
 <script>
@@ -139,6 +181,7 @@
       workshops: {{ workshops | tojson }},
       vats: {{ vats | tojson }},
       filterWs: {{ filter_workshop if filter_workshop is not none else 'null' }},
+      filterStatus: {{ filter_status | tojson }},
       selectedId: {{ selected_vat if selected_vat is not none else 'null' }},
       init() {
         const params = new URLSearchParams(window.location.search);
@@ -146,33 +189,65 @@
           const w = parseInt(params.get('workshop'), 10);
           if (!isNaN(w)) this.filterWs = w;
         }
+        if (params.has('status') && this.filterStatus === null) {
+          const s = params.get('status');
+          if (['idle', 'reducing', 'ready'].includes(s)) this.filterStatus = s;
+        }
         if (params.has('vat') && this.selectedId === null) {
           const v = parseInt(params.get('vat'), 10);
           if (!isNaN(v)) this.selectedId = v;
         }
       },
-      setFilter(id) {
-        this.filterWs = id;
-        const still = this.filteredVats().some(v => v.id === this.selectedId);
-        if (!still) this.selectedId = null;
+      // 唯一筛选口径：工坊 + 状态。状态判定只比对持久化的 v.status 字段，
+      // 绝不使用读数派生的 potentialReady —— 条文亮灯但状态仍「还原中」的缸不计入。
+      matchesStatus(v, s) {
+        return s === null || v.status === s;
+      },
+      wsScoped() {
+        return this.filterWs === null
+          ? this.vats
+          : this.vats.filter(v => v.workshopId === this.filterWs);
+      },
+      filteredVats() {
+        const scope = this.wsScoped();
+        return this.filterStatus === null
+          ? scope
+          : scope.filter(v => this.matchesStatus(v, this.filterStatus));
+      },
+      // 图例张数与可见集共用同一谓词，按状态字段计数。
+      countAll() {
+        return this.wsScoped().length;
+      },
+      countFor(s) {
+        return this.wsScoped().filter(v => this.matchesStatus(v, s)).length;
+      },
+      syncUrl() {
         const url = new URL(window.location.href);
-        if (id === null) url.searchParams.delete('workshop');
-        else url.searchParams.set('workshop', id);
+        if (this.filterWs === null) url.searchParams.delete('workshop');
+        else url.searchParams.set('workshop', this.filterWs);
+        if (this.filterStatus === null) url.searchParams.delete('status');
+        else url.searchParams.set('status', this.filterStatus);
         if (this.selectedId) url.searchParams.set('vat', this.selectedId);
         else url.searchParams.delete('vat');
         history.replaceState(null, '', url.pathname + url.search);
       },
-      filteredVats() {
-        if (this.filterWs === null) return this.vats;
-        return this.vats.filter(v => v.workshopId === this.filterWs);
+      pruneSelection() {
+        const still = this.filteredVats().some(v => v.id === this.selectedId);
+        if (!still) this.selectedId = null;
+      },
+      setFilter(id) {
+        this.filterWs = id;
+        this.pruneSelection();
+        this.syncUrl();
+      },
+      setStatusFilter(s) {
+        this.filterStatus = s;
+        this.pruneSelection();
+        this.syncUrl();
       },
       toggle(id) {
         this.selectedId = this.selectedId === id ? null : id;
-        const url = new URL(window.location.href);
-        if (this.selectedId) url.searchParams.set('vat', this.selectedId);
-        else url.searchParams.delete('vat');
-        if (this.filterWs !== null) url.searchParams.set('workshop', this.filterWs);
-        history.replaceState(null, '', url.pathname + url.search);
+        this.syncUrl();
       },
       selected() {
         return this.vats.find(v => v.id === this.selectedId) || null;
